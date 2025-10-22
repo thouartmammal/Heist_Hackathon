@@ -1,0 +1,14 @@
+{
+  "name": "sense-shift",
+  "version": "1.0.0",
+  "description": "SenseShift – Electron + Firebase desktop app",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^32.2.0"
+  },
+  "author": "Albert",
+  "license": "MIT"
+}
