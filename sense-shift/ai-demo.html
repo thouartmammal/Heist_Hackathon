@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SenseShift AI Demo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="ai-demo-page">
+  <header>
+    <!-- <div class="logo"><img src="logo.png" alt="SenseShift"></div> -->
+    <nav class="ai-nav">
+      <a href="dashboard.html" class="ai-link-btn">Back to Dashboard</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="ai-demo">
+      <h2>AI Focus Monitor</h2>
+      <div class="ai-cards">
+        <div class="ai-card">
+          <h3>Click Rate</h3>
+          <p id="clickRate" class="ai-metric">10</p>
+          <span class="ai-metric-sub">clicks/min</span>
+        </div>
+        <div class="ai-card">
+          <h3>Tab Switch Speed</h3>
+          <p id="tabSpeed" class="ai-metric">3</p>
+          <span class="ai-metric-sub">switches/min</span>
+        </div>
+        <div class="ai-card">
+          <h3>Focus Outlook</h3>
+          <p id="focusScore" class="ai-metric">83%</p>
+          <span class="ai-metric-sub">higher = calmer</span>
+        </div>
+      </div>
+
+  <div class="ai-chart">
+    <h3>Productivity Rhythm (Past 24h)</h3>
+    <canvas id="productivityChart" width="680" height="260" style="border-radius: 8px;"></canvas>
+  </div>
+
+  <!-- Include Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+
+    </section>
+  </main>
+
+  <script type="module" src="ai-demo.js"></script>
+<script>
+  setTimeout(() => {
+    // update numbers first
+    document.getElementById("clickRate").textContent = "20";
+    document.getElementById("tabSpeed").textContent = "10";
+    document.getElementById("focusScore").textContent = "76%";
+
+    // show popup 1 second later
+    setTimeout(() => {
+      alert("Focus check 🔔  Your focus seems to be dropping — take a short break!");
+    }, 1000);
+
+  }, 55000);
+</script>
+<script>
+  // Dummy 24-hour productivity curve
+  const hours = Array.from({length: 24}, (_, i) => i); // 0–23
+  const productivity = hours.map(h => {
+    if (h >= 6 && h <= 10) return Math.random() * 15 + 80;   // high morning
+    if (h >= 11 && h <= 14) return Math.random() * 10 + 70;  // decent mid-day
+    if (h >= 15 && h <= 18) return Math.random() * 15 + 55;  // drop afternoon
+    if (h >= 19 && h <= 22) return Math.random() * 10 + 45;  // evening slump
+    return Math.random() * 10 + 35;                          // late night low
+  });
+
+  const ctx = document.getElementById('productivityChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: hours.map(h => `${h}:00`),
+      datasets: [{
+        label: 'Productivity Score',
+        data: productivity,
+        borderColor: '#007AFF',
+        borderWidth: 3,
+        fill: true,
+        backgroundColor: 'rgba(0,122,255,0.15)',
+        tension: 0.4, // smooth curve
+        pointRadius: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          grid: { display: false },
+          title: { display: true, text: 'Hour of Day (0–24)' }
+        },
+        y: {
+          min: 0,
+          max: 100,
+          grid: { display: false },
+          title: { display: true, text: 'Productivity Score (0–100)' }
+        }
+      }
+    }
+  });
+</script>
+
+
+
+
+</body>
+</html>
