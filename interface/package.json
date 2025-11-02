@@ -7,8 +7,10 @@
     "start": "electron ."
   },
   "devDependencies": {
-    "electron": "^32.2.0",
+
+    "electron": "^32.3.3",
     "electron-builder": "^26.0.12"
+
   },
   "author": "Albert",
   "license": "MIT"
