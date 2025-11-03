@@ -3,101 +3,132 @@ import IOKit.graphics
 import Quartz
 import Foundation
 import Darwin
-import HealthKit 
+import HealthKit
+import FirebaseCore
+import FirebaseFirestore
+
+// ---------------- Firebase helpers ----------------
+
+func setupFirebase() {
+    let plistRelativePath = "./Heist_Hackathon/GoogleService-Info.plist"
+    if FileManager.default.fileExists(atPath: plistRelativePath) {
+        if let options = FirebaseOptions(contentsOfFile: plistRelativePath) {
+            FirebaseApp.configure(options: options)
+            print("Firebase configured from plist at \(plistRelativePath)")
+            return
+        } else {
+            print("Found plist at \(plistRelativePath) but failed to create FirebaseOptions.")
+        }
+    } else {
+        print("No GoogleService-Info.plist found at \(plistRelativePath). Firebase disabled.")
+    }
+}
+
+func sendToFirebase(output: Output) {
+    guard FirebaseApp.app() != nil else {
+        print("→ Firebase not configured; skipping upload. Output JSON:")
+        do {
+            let json = try JSONEncoder().encode(output)
+            print(String(data: json, encoding: .utf8) ?? "<encoding error>")
+        } catch {
+            print("Error encoding output for print: \(error)")
+        }
+        return
+    }
+
+    let db = Firestore.firestore()
+    do {
+        let jsonData = try JSONEncoder().encode(output)
+        guard let dict = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            print("Error converting encoded output to dictionary")
+            return
+        }
+
+        db.collection("senseShiftData").addDocument(data: dict) { error in
+            if let error = error {
+                print("Firestore upload failed: \(error)")
+            } else {
+                print("Data uploaded to Firestore at \(Date())")
+            }
+        }
+    } catch {
+        print("Error preparing data for Firebase: \(error)")
+    }
+}
 
 // ---------------------- MacOS System -----------------------
 
 class KeyTapTracker {
-    var tapCount = 0
-    var windowStart = Date()
+    private(set) var tapCount = 0
+    private var windowStart = Date()
 
     func registerTap() {
         tapCount += 1
     }
 
-    func checkAndReset() -> Int? {
+    // Always returns the taps in the sliding window; if window hasn't elapsed, return current count (you can change behavior if you prefer nil)
+    func checkAndResetIfElapsed(interval: TimeInterval = 10) -> Int? {
         let now = Date()
         let elapsed = now.timeIntervalSince(windowStart)
 
-        if elapsed >= 10 {
+        if elapsed >= interval {
             let taps = tapCount
             tapCount = 0
             windowStart = now
             return taps
         }
-        return nil 
-
-        // return 0 = no keys were tapped
-        // return nil = time interval hasn't finished
+        return nil
     }
 }
 
-
-    /// Callback function for keyboard events
+/// Callback function for keyboard events
 func processKeyboardTap(
-
     proxy: CGEventTapProxy,
     type: CGEventType,
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-        
+
     guard type == .keyDown else {
         return Unmanaged.passUnretained(event)
     }
-        
-    // Retrieve tracker from refcon
+
     guard let refcon = refcon else {
         return Unmanaged.passUnretained(event)
     }
-    let tracker = Unmanaged<KeyTapTracker>.fromOpaque(refcon).takeUnretainedValue()
 
-    // increase count
+    let tracker = Unmanaged<KeyTapTracker>.fromOpaque(refcon).takeUnretainedValue()
     tracker.registerTap()
-        
-    if let taps = tracker.checkAndReset() {
-        print("Keys tapped in last 10 seconds: \(taps)")
-    }
-        
+
     return Unmanaged.passUnretained(event)
 }
 
+class MacOSSystem {
+    // Keep a strong reference to the event tap so it isn't deallocated
+    private var eventTap: CFMachPort?
+    let keyTapTracker = KeyTapTracker()
 
-
-class MacOSSystem{
     func getBrightness() -> Float? {
-        
         var iterator = io_iterator_t()
 
-        // inding IOService objects currently registered by IOKit 
-
         guard IOServiceGetMatchingServices(kIOMainPortDefault,
-                                        IOServiceMatching("IODisplayConnect"),
-                                        &iterator) == kIOReturnSuccess 
-            else {
-                return nil 
-            }
+                                           IOServiceMatching("IODisplayConnect"),
+                                           &iterator) == kIOReturnSuccess else {
+            return nil
+        }
+        defer { IOObjectRelease(iterator) }
 
-        defer { IOObjectRelease(iterator) } // Auto-release when done (end of scrope not currently)
-    
-        // Iterate through all found services until brightness is found
-        // Swift doesn't allow assignment directly in while so you need to write it in this syntax.
         while case let service = IOIteratorNext(iterator), service != 0 {
             defer { IOObjectRelease(service) }
 
             var brightness: Float = 0
-            // kIODisplayBrightnessKey = the parameter we want to get
-            if IODisplayGetFloatParameter(service, 0,
-                                        kIODisplayBrightnessKey as CFString,
-                                        &brightness) == kIOReturnSuccess {
+            if IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &brightness) == kIOReturnSuccess {
                 return brightness
             }
         }
 
         return nil
     }
-
-    let keyTapTracker = KeyTapTracker()
 
     func getKeyboardTaps() -> Bool {
         let mask = (1 << CGEventType.keyDown.rawValue)
@@ -107,17 +138,17 @@ class MacOSSystem{
         let refcon = UnsafeMutableRawPointer(Unmanaged.passUnretained(keyTapTracker).toOpaque())
 
         guard let event_task = CGEventTapCreate(
-            kCGHIDEventTap, // lowest-level (hardware) event tap
-            .headInsertEventTap, // tap gets events first
+            kCGHIDEventTap,
+            .headInsertEventTap,
             .listenOnly,
-            mask, // keyboard event
-            processKeyboardTap, // callback function
-            refcon // userInfo
+            mask,
+            processKeyboardTap,
+            refcon
         ) else {
             return false
         }
 
-        // Create a run loop source for the tap and add it to the run loop
+        eventTap = event_task
         let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, event_task, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEventTapEnable(event_task, true)
@@ -126,44 +157,24 @@ class MacOSSystem{
     }
 
     func getSystemUptime() -> TimeInterval? {
-        // mib = Management Information Base
-        // mib is an array telling sysctl what info I want.
         var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
-
-        // time the system last booted
         var bootTime = timeval()
-
-        // get size of timeval struct to pass to sysctl
         var size = MemoryLayout<timeval>.stride
 
-        // write the value of when the system started to bootTime
-        let result = sysctl(
-            &mib, // Pointer to the name array
-            u_int(mib.count), // number of elements in 'mib'
-            &bootTime, // Pointer to output buffer
-            &size, // Pointer to size of output buffer
-            nil, // input buffer (not used here)
-            0) // size of input buffer (not used here)
-
+        let result = sysctl(&mib, u_int(mib.count), &bootTime, &size, nil, 0)
         if result != 0 {
             perror("sysctl")
             return nil
         }
 
-        // Convert timeval (boot time) to Date
         let bootDate = Date(timeIntervalSince1970: TimeInterval(bootTime.tv_sec))
-        
-        // subtract boot date from current date to get uptime
-        let uptime = Date().timeIntervalSince(bootDate)
-
-        return uptime
+        return Date().timeIntervalSince(bootDate)
     }
 }
 
-// ----------------------- Biometric Watch Integration -----------------------
+// ----------------------- HealthKit wrapper -----------------------
 
-
-class HealthKit {
+class HealthDataManager {
     let healthStore = HKHealthStore()
 
     func requestAuthorization() async throws {
@@ -202,12 +213,10 @@ class HealthKit {
 
             let predicate = HKQuery.predicateForSamples(withStart: startDate, end: endDate, options: .strictStartDate)
 
-            let query = HKSampleQuery(
-                sampleType: quantityType,
-                predicate: predicate,
-                limit: HKObjectQueryNoLimit,
-                sortDescriptors: nil
-            ) { _, results, error in
+            let query = HKSampleQuery(sampleType: quantityType,
+                                      predicate: predicate,
+                                      limit: HKObjectQueryNoLimit,
+                                      sortDescriptors: nil) { _, results, error in
                 if let error = error {
                     continuation.resume(throwing: error)
                     return
@@ -256,15 +265,13 @@ class HealthKit {
                     partialResult + sample.endDate.timeIntervalSince(sample.startDate)
                 }
 
-                let totalSleepHours = totalSleepSeconds / 3600
-                continuation.resume(returning: totalSleepHours)
+                continuation.resume(returning: totalSleepSeconds / 3600.0)
             }
 
             healthStore.execute(query)
         }
     }
 
-    // Helpers to get aggregated sums for some data (e.g., steps)
     func fetchSumQuantitySamples(
         for identifier: HKQuantityTypeIdentifier,
         unit: HKUnit,
@@ -291,39 +298,16 @@ class HealthKit {
             healthStore.execute(query)
         }
     }
-
-    // Fetch all data
-    func getAllData() async {
-        let now = Date()
-        let startDate = Calendar.current.date(byAdding: .hour, value: -1, to: now)!
-        let sleepStartDate = Calendar.current.startOfDay(for: now) // Start of today
-        let sleepEndDate = Calendar.current.date(byAdding: .day, value: 1, to: sleepStartDate)!
-
-        do {
-            async let heartRates = fetchQuantitySamples(for: .heartRate, unit: HKUnit.count().unitDivided(by: .minute()), startDate: startDate, endDate: now)
-            async let spo2 = fetchQuantitySamples(for: .oxygenSaturation, unit: HKUnit.percent(), startDate: startDate, endDate: now)
-            async let respRate = fetchQuantitySamples(for: .respiratoryRate, unit: HKUnit.count().unitDivided(by: .minute()), startDate: startDate, endDate: now)
-            async let calories = fetchQuantitySamples(for: .activeEnergyBurned, unit: .kilocalorie(), startDate: startDate, endDate: now)
-            async let stepCount = fetchSumQuantitySamples(for: .stepCount, unit: .count(), startDate: startDate, endDate: now)
-            async let sleepHours = fetchSleepAnalysis(startDate: sleepStartDate, endDate: sleepEndDate)
-
-            let (heartRatesValues, spo2Values, respRateValues, caloriesValues, totalSteps, totalSleep) = try await (heartRates, spo2, respRate, calories, stepCount, sleepHours)
-
-        } catch {
-            print("Error fetching HealthKit data: \(error)")
-        }
-    }
 }
-
 
 // ----------------------- Main Application -----------------------
 
 struct Output: Codable {
-    let currentTime = Date
+    let currentTime: Date
     let brightness: Float?
     let keyboardTaps: Int?
     let systemUptime: TimeInterval?
-    let stepCount: Double?            
+    let stepCount: Double?
     let sleepHours: Double?
     let heartRates: [Double]?
     let bloodOxygenPercent: [Double]?
@@ -333,35 +317,76 @@ struct Output: Codable {
 
 @main
 class MyApp {
-    static func main(){
-        var System = MacOSSystem()  
-        var HealthKit = HealthKit()
+    static func main() {
+        // Setup Firebase if plist is present (safe no-op otherwise)
+        setupFirebase()
 
-        // Start the keyboard tap
-        guard System.getKeyboardTaps() else {
+        let system = MacOSSystem()
+        let healthManager = HealthDataManager()
+
+        // Create keyboard event tap
+        guard system.getKeyboardTaps() else {
             print("Failed to create keyboard event tap.")
             return
         }
 
-        // Schedule a timer to run every 10 seconds
-    _ = Foundation.Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { _ in
-        Task {
-            let keyboardTap = System.keyTapTracker.checkAndReset()
-            let brightness = System.getBrightness()
-            let systemUptime = System.getSystemUptime()
+        // Determine if we can use HealthKit (non-fatal)
+        var healthAvailable = HKHealthStore.isHealthDataAvailable()
+        if healthAvailable {
+            Task {
+                do {
+                    try await healthManager.requestAuthorization()
+                    print("HealthKit authorized")
+                } catch {
+                    print("HealthKit auth failed: \(error)")
+                    healthAvailable = false
+                }
+            }
+        } else {
+            print("HealthKit not available on this device — skipping biometric data.")
+        }
 
-            do {
-                async let heartRates = HealthKit.fetchQuantitySamples(for: .heartRate, unit: HKUnit.count().unitDivided(by: .minute()), startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date())!, endDate: Date())
-                async let spo2 = HealthKit.fetchQuantitySamples(for: .oxygenSaturation, unit: HKUnit.percent(), startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date())!, endDate: Date())
-                async let respRates = HealthKit.fetchQuantitySamples(for: .respiratoryRate, unit: HKUnit.count().unitDivided(by: .minute()), startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date())!, endDate: Date())
-                async let calories = HealthKit.fetchQuantitySamples(for: .activeEnergyBurned, unit: .kilocalorie(), startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date())!, endDate: Date())
-                async let stepCount = HealthKit.fetchSumQuantitySamples(for: .stepCount, unit: .count(), startDate: Calendar.current.date(byAdding: .hour, value: -1, to: Date())!, endDate: Date())
-                
-                let sleepStartDate = Calendar.current.startOfDay(for: Date())
-                let sleepEndDate = Calendar.current.date(byAdding: .day, value: 1, to: sleepStartDate)!
-                async let sleepHours = HealthKit.fetchSleepAnalysis(startDate: sleepStartDate, endDate: sleepEndDate)
+        // Prevent overlapping runs
+        var isRunning = false
 
-                let (heartRatesValues, spo2Values, respRatesValues, caloriesValues, totalSteps, totalSleep) = try await (heartRates, spo2, respRates, calories, stepCount, sleepHours)
+        Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { _ in
+            // avoid overlapping executions
+            guard !isRunning else { return }
+            isRunning = true
+
+            Task {
+                defer { isRunning = false }
+
+                let keyboardTap = system.keyTapTracker.checkAndResetIfElapsed(interval: 10) ?? 0
+                let brightness = system.getBrightness()
+                let systemUptime = system.getSystemUptime()
+
+                // Prepare optional health variables
+                var heartRatesValues: [Double]? = nil
+                var spo2Values: [Double]? = nil
+                var respRatesValues: [Double]? = nil
+                var caloriesValues: [Double]? = nil
+                var totalSteps: Double? = nil
+                var totalSleep: Double? = nil
+
+                if healthAvailable {
+                    do {
+                        async let heartRates = healthManager.fetchQuantitySamples(for: .heartRate, unit: HKUnit.count().unitDivided(by: .minute()), startDate: Date().addingTimeInterval(-3600), endDate: Date())
+                        async let spo2 = healthManager.fetchQuantitySamples(for: .oxygenSaturation, unit: HKUnit.percent(), startDate: Date().addingTimeInterval(-3600), endDate: Date())
+                        async let respRates = healthManager.fetchQuantitySamples(for: .respiratoryRate, unit: HKUnit.count().unitDivided(by: .minute()), startDate: Date().addingTimeInterval(-3600), endDate: Date())
+                        async let calories = healthManager.fetchQuantitySamples(for: .activeEnergyBurned, unit: .kilocalorie(), startDate: Date().addingTimeInterval(-3600), endDate: Date())
+                        async let stepCount = healthManager.fetchSumQuantitySamples(for: .stepCount, unit: .count(), startDate: Date().addingTimeInterval(-3600), endDate: Date())
+                        let sleepStartDate = Calendar.current.startOfDay(for: Date())
+                        let sleepEndDate = Calendar.current.date(byAdding: .day, value: 1, to: sleepStartDate)!
+                        async let sleepHours = healthManager.fetchSleepAnalysis(startDate: sleepStartDate, endDate: sleepEndDate)
+
+                        (heartRatesValues, spo2Values, respRatesValues, caloriesValues, totalSteps, totalSleep) =
+                            try await (heartRates, spo2, respRates, calories, stepCount, sleepHours)
+                    } catch {
+                        print("HealthKit fetch failed: \(error)")
+                        // if HealthKit fails for any reason, we'll send system-only data (biometric vars remain nil)
+                    }
+                }
 
                 let output = Output(
                     currentTime: Date(),
@@ -371,25 +396,16 @@ class MyApp {
                     stepCount: totalSteps,
                     sleepHours: totalSleep,
                     heartRates: heartRatesValues,
-                    bloodOxygenPercent: spo2Values.map { $0 * 100 },
+                    bloodOxygenPercent: spo2Values?.map { $0 * 100 },
                     respiratoryRates: respRatesValues,
                     caloriesBurned: caloriesValues
                 )
 
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                let jsonData = try encoder.encode(output)
-                if let jsonString = String(data: jsonData, encoding: .utf8) {
-                    print(jsonString)
-                }
-
-            } catch {
-                print("Error fetching HealthKit data: \(error)")
+                sendToFirebase(output: output)
             }
         }
-    }
-        print("Starting run loop...")
 
+        print("Starting run loop…")
         CFRunLoopRun()
     }
 }
