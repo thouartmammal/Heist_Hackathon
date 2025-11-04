@@ -1,3 +1,4 @@
+
 const { app, BrowserWindow,ipcMain ,Notification } = require("electron");
 let win;
 const path = require("path");
@@ -24,6 +25,22 @@ app.whenReady().then(()=>{
     new Notification({ title, body }).show();
   });
 });
+ipcMain.handle('startRealtimeTraining', (_, uid) => {
+  const py = spawn('python', [path.join(__dirname, 'trainModel.py'), uid]);
+  py.stdout.on('data', (d) => {
+    const msg = d.toString().trim();
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed.prediction === 'overwhelmed') {
+        const title = 'SenseShift';
+        const body = 'You seem overwhelmed — breathe deeply 💭';
+        new Notification({ title, body }).show();
+        if (mainWindow) mainWindow.webContents.send('notify', { title, body });
+      }
+    } catch { console.log('[trainModel]', msg); }
+  });
+});
+
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
